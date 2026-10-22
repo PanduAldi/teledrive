@@ -59,28 +59,24 @@ export async function commit(state) {
   reg.seq = state.seq;
   reg.updated = Date.now();
 
-  await Promise.all(
-    MAPPERS.map(async (topicId, i) => {
-      const nodes = byTopic[i] || {};
-      const text = JSON.stringify({ v: 1, i, seq: state.seq, nodes });
-      const mid = (reg.shards[topicId] || [])[0];
-      try {
-        if (mid) {
-          try { await editMessage(mid, text); }
-          catch (e) {
-            if (!/not modified/i.test(e.message)) throw e; // identical content = already saved
-          }
-          return;
-        }
-        if (!Object.keys(nodes).length) return; // never create an empty shard message
-        const m = await sendText(topicId, text);
-        reg.shards[topicId] = [m.message_id];
-      } catch (e) {
-        console.warn(`shard ${topicId} gagal ditulis:`, e.message);
-        throw e;
+  // Sequential: parallel shard writes burst past the group's per-chat flood
+  // limit (20 messages/min) and earn a 429. Four small edits cost nothing.
+  for (let i = 0; i < MAPPERS.length; i++) {
+    const topicId = MAPPERS[i];
+    const nodes = byTopic[i] || {};
+    const text = JSON.stringify({ v: 1, i, seq: state.seq, nodes });
+    const mid = (reg.shards[topicId] || [])[0];
+    if (mid) {
+      try { await editMessage(mid, text); }
+      catch (e) {
+        if (!/not modified/i.test(e.message)) throw e; // identical content = already saved
       }
-    })
-  );
+      continue;
+    }
+    if (!Object.keys(nodes).length) continue; // never create an empty shard message
+    const m = await sendText(topicId, text);
+    reg.shards[topicId] = [m.message_id];
+  }
 
   saveReg(reg);
   state.reg = reg;

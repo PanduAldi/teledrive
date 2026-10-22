@@ -188,7 +188,7 @@ export default function App() {
         {filtered.map((n) => (
           <div className="item" key={n.id}>
             <div className="icon" onClick={() => openPreview(n)}>
-              {n.kind === "image" || (n.t || "").startsWith("image/")
+              {kindOf(n) === "image"
                 ? <Thumb node={n} />
                 : <span className="emoji">{ICON[kindOf(n)]}</span>}
             </div>

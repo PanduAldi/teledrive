@@ -58,7 +58,7 @@ try {
   const spread = new Set(ids.map(mapperFor));
   ok("all 4 shards get used", spread.size === 4, `used ${spread.size}`);
 } catch (e) {
-  fail++; console.log("  FAIL exception:", e.message);
+  fail++; console.log("  FAIL exception:", e.message, "| cause:", e.cause?.code || e.cause?.message || "-");
 } finally {
   console.log(`\ncleanup (${created.length} test messages)`);
   for (const mid of created) {

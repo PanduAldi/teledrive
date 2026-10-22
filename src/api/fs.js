@@ -92,14 +92,17 @@ function collectNodes(id, acc = []) {
 // Irreversible: storage messages are deleted, nodes dropped from the index.
 export async function purge(id) {
   const nodes = collectNodes(id);
+  // capture the parent BEFORE the node objects are dropped — otherwise the
+  // parent's child list keeps a dangling id and the folder shows a ghost row.
+  const parentId = state.nodes[id]?.p;
   for (const n of nodes) {
     if (n.k !== "f") continue;
     if (n.mid) await delHere(n.mid).catch((e) => console.warn("del mid:", e.message));
     for (const cm of n.chMids || []) await delHere(cm).catch(() => {});
   }
   for (const n of nodes) delete state.nodes[n.id];
-  const par = state.nodes[state.nodes[id]?.p];
-  if (par) par.c = par.c.filter((c) => c !== id);
+  const par = state.nodes[parentId];
+  if (par?.c) par.c = par.c.filter((c) => c !== id);
   state.seq += 1;
   await commit(state);
 }

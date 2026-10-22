@@ -32,8 +32,44 @@ export function fileBase() {
   return WORKER ? `${WORKER}/file` : `https://api.telegram.org/file/bot${TOKEN}`;
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Transport retry: some networks black-hole ~a third of new TLS connections to
+// api.telegram.org (10 s connect timeout); a fresh socket usually succeeds.
+// Also honours Telegram flood control (429 carries parameters.retry_after).
+// Only network errors and 429/5xx are retried — never a 4xx logic error, and the
+// body must be replayable (URLSearchParams / FormData, never a stream).
+async function fetchRetry(url, opts, { attempts = 4 } = {}) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.status === 429) {
+        let wait = 3;
+        try { wait = (await res.clone().json())?.parameters?.retry_after ?? 3; } catch { /* keep default */ }
+        lastErr = new Error(`rate limited (retry_after ${wait}s)`);
+        if (i === attempts - 1) break;
+        await sleep(Math.min(wait, 60) * 1000);
+        continue;
+      }
+      if (res.status >= 500) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        if (i === attempts - 1) break;
+        await sleep(700 * (i + 1));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (i === attempts - 1) break;
+      await sleep(400 * (i + 1));
+    }
+  }
+  throw lastErr;
+}
+
 async function callRaw(method, body, isForm) {
-  const res = await fetch(worked(method), {
+  const res = await fetchRetry(worked(method), {
     method: "POST",
     headers: isForm ? undefined : { "Content-Type": "application/x-www-form-urlencoded" },
     body,
