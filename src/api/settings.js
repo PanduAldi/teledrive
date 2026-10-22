@@ -3,7 +3,7 @@
 // discovered from getMe → getChat on first connect (Settings flow) and stored.
 
 import { configure, call } from "./tg.js";
-import { loadSettings, saveSettings, DEFAULT_CHAT } from "./config.js";
+import { loadSettings, saveSettings, DEFAULT_CHAT, setTopics } from "./config.js";
 import { kv } from "./kv.js";
 
 const DM_KEY = "tdw.dmuser.v1";
@@ -42,6 +42,12 @@ export function getDmUser() { return kv.get(DM_KEY) || ""; }
 
 export function boot() {
   const s = loadSettings();
-  if (s?.token) configure({ ...s, dmUser: getDmUser() });
+  if (s?.tp) {
+    const [storage, backup, recycle, ...mappers] = s.tp.split(",").map((x) => parseInt(x, 10));
+    setTopics({ chat: s.chat, storage, backup, recycle, mappers });
+  } else if (s?.chat) {
+    setTopics({ chat: s.chat });
+  }
+  if (s?.token) configure({ ...s, chat: s.chat || DEFAULT_CHAT, dmUser: getDmUser() });
   return s;
 }

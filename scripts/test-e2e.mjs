@@ -10,7 +10,7 @@ const DM_USER = "343647452";
 const { configure, call, sendText, readMessage, editMessage, delHere } = await import("../src/api/tg.js");
 configure({ token: TOKEN, chat: "-1003539953822", dmUser: DM_USER });
 
-const { MAPPERS, BACKUP_TOPIC } = await import("../src/api/config.js");
+const { topics } = await import("../src/api/config.js");
 const { loadAll, commit, uid, mapperFor } = await import("../src/api/store.js");
 
 let pass = 0, fail = 0;
@@ -24,7 +24,7 @@ try {
   console.log("1) send + read back a shard-shaped message");
   const nodes = { [uid()]: { id: "x", k: "d", n: "probe", p: "", c: [], ts: 1 } };
   const text = JSON.stringify({ v: 1, i: 0, seq: 7, nodes });
-  const m = await sendText(MAPPERS[0], text);
+  const m = await sendText(topics.mappers[0], text);
   created.push(m.message_id);
   const back = await readMessage(m.message_id);
   ok("text round-trips through forwardMessage", back.text === text, back.text);
@@ -53,7 +53,7 @@ try {
 
   console.log("5) mapperFor is stable and in range");
   const ids = Array.from({ length: 200 }, uid);
-  ok("all ids map into 0..3", ids.every((i) => { const v = mapperFor(i); return Number.isInteger(v) && v >= 0 && v < MAPPERS.length; }));
+  ok("all ids map into 0..3", ids.every((i) => { const v = mapperFor(i); return Number.isInteger(v) && v >= 0 && v < topics.mappers.length; }));
   ok("mapping is deterministic", ids.every((i) => mapperFor(i) === mapperFor(i)));
   const spread = new Set(ids.map(mapperFor));
   ok("all 4 shards get used", spread.size === 4, `used ${spread.size}`);

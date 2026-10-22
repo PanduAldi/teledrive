@@ -3,7 +3,6 @@ import * as fs from "./api/fs.js";
 import * as cfg from "./api/config.js";
 import * as settings from "./api/settings.js";
 import { uploadFile, urlForFile, triggerDownload, DIRECT_MAX } from "./api/upload.js";
-import { STORAGE_TOPIC } from "./api/config.js";
 import { readMessage } from "./api/tg.js";
 
 const fmt = (b) => {
@@ -317,6 +316,10 @@ function Settings({ me, onClose, onSaved }) {
   const [token, setToken] = useState(s.token || "");
   const [worker, setWorker] = useState(s.worker || "");
   const [dm, setDm] = useState(settings.getDmUser());
+  const [chat, setChat] = useState(s.chat || cfg.topics.chat);
+  const [tp, setTp] = useState(
+    s.tp || [cfg.topics.storage, cfg.topics.backup, cfg.topics.recycle, ...cfg.topics.mappers].join(",")
+  );
   const [msg, setMsg] = useState("");
   return (
     <div className="modal" onClick={onClose}>
@@ -333,11 +336,24 @@ function Settings({ me, onClose, onSaved }) {
           <label>Telegram user id (untuk baca index)
             <input value={dm} onChange={(e) => setDm(e.target.value)} placeholder={String(me.id)} />
           </label>
+          <label>Chat ID grup penyimpanan
+            <input value={chat} onChange={(e) => setChat(e.target.value)}
+                   placeholder="-100…" spellCheck={false} />
+          </label>
+          <label>Topic ID <span className="muted">(storage, backup, recycle, dipisah koma untuk 4 mapper:
+            <i> storage,backup,recycle,m0,m1,m2,m3</i>)</span>
+            <input value={tp} onChange={(e) => setTp(e.target.value)}
+                   placeholder="61,59,60,55,56,57,58" spellCheck={false} />
+          </label>
           <button className="primary wide" onClick={async () => {
             try {
-              cfg.saveSettings({ ...s, token, worker });
+              const parts = tp.split(",").map((x) => parseInt(x.trim(), 10)).filter((x) => Number.isInteger(x));
+              if (parts.length && parts.length !== 7) throw new Error("Topic ID harus 7 angka: storage,backup,recycle,m0,m1,m2,m3");
+              const [storage, backup, recycle, ...mappers] = parts;
+              cfg.saveSettings({ ...s, token, worker, chat, tp: parts.length ? tp : "" });
               const { configure } = await import("./api/tg.js");
-              configure({ token, worker, chat: cfg.DEFAULT_CHAT, dmUser: dm });
+              configure({ token, worker, chat: chat || cfg.DEFAULT_CHAT, dmUser: dm });
+              cfg.setTopics({ chat, storage, backup, recycle, mappers });
               if (dm) await settings.bindDmUser(dm);
               onSaved();
             } catch (e) { setMsg(e.message); }
@@ -345,7 +361,7 @@ function Settings({ me, onClose, onSaved }) {
           {msg && <p className="err">{msg}</p>}
           <p className="muted small">
             Terhubung sebagai @{me.username || me.first_name}.
-            Penyimpanan: grup Telegram (topic storage {STORAGE_TOPIC}).
+            Penyimpanan: grup Telegram (topic storage {cfg.topics.storage}).
             Batas {fmt(DIRECT_MAX)}/file tanpa Worker.
           </p>
         </div>

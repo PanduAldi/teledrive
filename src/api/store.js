@@ -1,13 +1,13 @@
 // Index storage: sharded JSON messages across mapper topics.
 //
-// Shard assignment: hash(node.id) % MAPPERS.length — deterministic on every
+// Shard assignment: hash(node.id) % topics.mappers.length — deterministic on every
 // device, so no local state is needed to find a node.
 //
 // Registry (which messages hold shards + the global sequence) is mirrored into
 // the backup topic, which is what makes the drive survivable from a fresh
 // browser: the UI can adopt an existing drive by pasting the backup message link.
 
-import { MAPPERS, BACKUP_TOPIC } from "./config.js";
+import { topics } from "./config.js";
 import { sendText, editMessage, readMessage } from "./tg.js";
 import { kv } from "./kv.js";
 
@@ -23,7 +23,7 @@ export function uid() {
 export function mapperFor(id) {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return h % MAPPERS.length;
+  return h % topics.mappers.length;
 }
 
 export function loadReg() {
@@ -36,7 +36,7 @@ export async function loadAll(onStep) {
   const reg = loadReg();
   if (!reg?.shards) return { seq: 0, nodes: {}, reg: null };
   const nodes = {};
-  for (const topicId of MAPPERS) {
+  for (const topicId of topics.mappers) {
     for (const mid of reg.shards[topicId] || []) {
       try {
         const m = await readMessage(mid);
@@ -61,8 +61,8 @@ export async function commit(state) {
 
   // Sequential: parallel shard writes burst past the group's per-chat flood
   // limit (20 messages/min) and earn a 429. Four small edits cost nothing.
-  for (let i = 0; i < MAPPERS.length; i++) {
-    const topicId = MAPPERS[i];
+  for (let i = 0; i < topics.mappers.length; i++) {
+    const topicId = topics.mappers[i];
     const nodes = byTopic[i] || {};
     const text = JSON.stringify({ v: 1, i, seq: state.seq, nodes });
     const mid = (reg.shards[topicId] || [])[0];
@@ -84,7 +84,7 @@ export async function commit(state) {
   try {
     const text = JSON.stringify({ v: 1, reg, ts: Date.now() });
     if (reg.backupMid) await editMessage(reg.backupMid, text);
-    else reg.backupMid = (await sendText(BACKUP_TOPIC, text)).message_id;
+    else reg.backupMid = (await sendText(topics.backup, text)).message_id;
     saveReg(reg);
   } catch (e) {
     console.warn("backup gagal:", e.message);

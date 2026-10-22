@@ -12,7 +12,7 @@
 //    real progress/range downloads.
 
 import { sendDoc, call, delHere } from "./tg.js";
-import { STORAGE_TOPIC } from "./config.js";
+import { topics } from "./config.js";
 
 export const DIRECT_MAX = 20 * 1024 * 1024; // hard Bot API download ceiling in direct mode
 export const CHUNK = 19 * 1024 * 1024;      // safety margin under that ceiling
@@ -28,7 +28,7 @@ export async function uploadFile(file, onProgress, workerMode) {
   }
   const chunks = Math.max(1, Math.ceil(file.size / CHUNK));
   if (chunks === 1) {
-    const msg = await sendDoc(STORAGE_TOPIC, file, JSON.stringify({ i: 0, n: 1, name: file.name }));
+    const msg = await sendDoc(topics.storage, file, JSON.stringify({ i: 0, n: 1, name: file.name }));
     onProgress?.(1);
     return { mid: msg.message_id, chMids: null, ch: null };
   }
@@ -37,7 +37,7 @@ export async function uploadFile(file, onProgress, workerMode) {
   const mids = [];
   for (let i = 0; i < chunks; i++) {
     const blob = file.slice(i * CHUNK, (i + 1) * CHUNK);
-    const msg = await sendDoc(STORAGE_TOPIC, blob, JSON.stringify({ i, n: chunks, name: file.name }));
+    const msg = await sendDoc(topics.storage, blob, JSON.stringify({ i, n: chunks, name: file.name }));
     mids.push(msg.message_id);
     onProgress?.((i + 1) / chunks);
   }
