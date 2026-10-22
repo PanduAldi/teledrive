@@ -39,11 +39,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Also honours Telegram flood control (429 carries parameters.retry_after).
 // Only network errors and 429/5xx are retried — never a 4xx logic error, and the
 // body must be replayable (URLSearchParams / FormData, never a stream).
-async function fetchRetry(url, opts, { attempts = 4 } = {}) {
+async function fetchRetry(url, opts, { attempts = 4, timeoutMs = 15000 } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, opts);
+      // A blackholed TCP connect never errors on its own — abort it so the
+      // retry can open a fresh socket instead of hanging the UI forever.
+      const signal = AbortSignal.timeout(timeoutMs);
+      const res = await fetch(url, { ...opts, signal });
       if (res.status === 429) {
         let wait = 3;
         try { wait = (await res.clone().json())?.parameters?.retry_after ?? 3; } catch { /* keep default */ }
@@ -66,6 +69,25 @@ async function fetchRetry(url, opts, { attempts = 4 } = {}) {
     }
   }
   throw lastErr;
+}
+
+// Direct Bot API call with an explicit token — used before the vault is unlocked
+// (setup wizard, credential probe) where the module-level transport isn't armed.
+export async function callWith(token, method, fields = {}, opts) {
+  const body = new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, String(v)]));
+  const url = `https://api.telegram.org/bot${String(token).replace(/^bot/, "")}/${method}`;
+  const res = await fetchRetry(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  }, opts);
+  const data = await res.json();
+  if (!data.ok) {
+    const e = new Error(`TG ${method}: ${data.description || res.status}`);
+    e.code = data.error_code;
+    throw e;
+  }
+  return data.result;
 }
 
 async function callRaw(method, body, isForm) {

@@ -4,7 +4,7 @@
 // sessionStorage so a page refresh does not re-prompt, and dies with the tab.
 
 import { deriveRaw, encryptJSON, decryptJSON, newSalt, ITERATIONS } from "./crypto.js";
-import { call, configure } from "./tg.js";
+import { call, callWith, configure } from "./tg.js";
 import { setTopics, DEFAULT_CHAT } from "./config.js";
 import { kv } from "./kv.js";
 
@@ -32,21 +32,12 @@ export function lastInputs() {
 }
 function saveInputs(o) { kv.set("tdw.inputs", JSON.stringify(o)); }
 
-async function callAs(token, method, fields) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(Object.entries(fields || {}).map(([k, v]) => [k, String(v)])),
-  });
-  const d = await res.json();
-  if (!d.ok) throw new Error(d.description || "Telegram error");
-  return d.result;
-}
-
 // Verify the Telegram side BEFORE sealing it behind the password.
+// Short per-attempt timeout: a blackholed connect must fail fast enough that the
+// setup button never looks dead (4 × 8 s worst case, then a clear error).
 async function probe({ token, dmUser }) {
-  await callAs(token, "getMe");
-  if (dmUser) await callAs(token, "sendChatAction", { chat_id: String(dmUser), action: "typing" });
+  await callWith(token, "getMe", {}, { timeoutMs: 8000 });
+  if (dmUser) await callWith(token, "sendChatAction", { chat_id: String(dmUser), action: "typing" }, { timeoutMs: 8000 });
 }
 
 function parseTp(tp) {

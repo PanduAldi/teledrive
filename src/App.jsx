@@ -301,15 +301,20 @@ function Setup({ onDone }) {
   const okPw = pw1.length >= 8 && pw1 === pw2;
 
   async function submit() {
-    setErr(""); setBusy("Memverifikasi ke Telegram…");
+    setErr(""); setBusy("Memverifikasi token ke Telegram…");
     try {
       await auth.provision(
         { token: token.trim(), dmUser: uid.trim(), chat: chat.trim(), tp: tp.trim() },
         pw1
       );
+      setBusy("Mengenkripsi & membuka drive…");
       onDone();
-    } catch (e) { setErr(e.message); }
-    setBusy("");
+    } catch (e) {
+      setBusy("");
+      setErr(/Failed to fetch|timeout|abort/i.test(e.message)
+        ? "Koneksi ke Telegram gagal/timeout. Cek internet, lalu coba lagi."
+        : e.message);
+    }
   }
 
   return (
