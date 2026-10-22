@@ -24,6 +24,7 @@ label input { margin-top: 5px; }
 h1 { margin: 0 0 6px; font-size: 22px; }
 .muted { color: var(--muted); } .small { font-size: 12.5px; }
 .err { color: var(--err); font-size: 13.5px; }
+.ok { color: #3fb950; font-size: 13.5px; }
 
 .app { display: flex; flex-direction: column; min-height: 100dvh; }
 header { display: flex; align-items: center; gap: 10px; padding: 10px 14px;

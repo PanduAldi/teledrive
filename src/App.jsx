@@ -430,6 +430,10 @@ function Settings({ me, onClose, onSaved, onLock }) {
   const [newPw, setNewPw] = useState("");
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [pwMsg, setPwMsg] = useState("");
+  const [pwErr, setPwErr] = useState("");
+  const [pwBusy, setPwBusy] = useState("");
+  const [saveBusy, setSaveBusy] = useState(false);
 
   return (
     <div className="modal" onClick={onClose}>
@@ -446,15 +450,17 @@ function Settings({ me, onClose, onSaved, onLock }) {
           <label>Topic ID <span className="muted">7 angka: storage,backup,recycle,m0,m1,m2,m3</span>
             <input value={tp} onChange={(e) => setTp(e.target.value)} placeholder="61,59,60,55,56,57,58" spellCheck={false} />
           </label>
-          <button className="primary wide" onClick={async () => {
-            setErr(""); setMsg("");
+          <button className="primary wide" disabled={saveBusy} onClick={async () => {
+            setErr(""); setMsg(""); setSaveBusy(true);
             try {
               await auth.update({ worker: worker.trim(), chat: chat.trim(), tp: tp.trim() });
-              setMsg("Tersimpan & terenkripsi ulang.");
+              setMsg("✓ Tersimpan & terenkripsi ulang.");
               onSaved();
-            } catch (e) { setErr(e.message); }
-          }}>Simpan</button>
-          {msg && <p className="muted small">{msg}</p>}
+            } catch (e) { setErr("✗ " + e.message); }
+            setSaveBusy(false);
+          }}>{saveBusy ? "Menyimpan…" : "Simpan"}</button>
+          {msg && <p className="ok small">{msg}</p>}
+          {err && <p className="err">{err}</p>}
 
           <hr />
           <p className="muted small">Ganti password (token tidak perlu diinput ulang)</p>
@@ -464,11 +470,18 @@ function Settings({ me, onClose, onSaved, onLock }) {
           <label>Password baru (min 8)
             <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
           </label>
-          <button className="wide" onClick={async () => {
-            setErr(""); setMsg("");
-            try { await auth.changePassword(oldPw, newPw); setMsg("Password diganti."); setOldPw(""); setNewPw(""); }
-            catch (e) { setErr(e.message); }
-          }}>Ganti password</button>
+          <button className="wide" disabled={!!pwBusy || !oldPw || !newPw} onClick={async () => {
+            setPwErr(""); setPwMsg("");
+            const old = oldPw, nw = newPw;
+            setPwBusy("Memverifikasi… (PBKDF2 600k, ±1-2 detik)");
+            try {
+              await auth.changePassword(old, nw);
+              setPwBusy(""); setPwMsg("✓ Password diganti. Pakai password baru mulai sekarang.");
+              setOldPw(""); setNewPw("");
+            } catch (e) { setPwBusy(""); setPwErr("✗ " + e.message); }
+          }}>{pwBusy ? pwBusy : "Ganti password"}</button>
+          {pwMsg && <p className="ok small">{pwMsg}</p>}
+          {pwErr && <p className="err">{pwErr}</p>}
 
           <hr />
           <button className="wide" onClick={onLock}>🔒 Kunci sekarang</button>
