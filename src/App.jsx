@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import * as fs from "./api/fs.js";
 import * as cfg from "./api/config.js";
-import * as settings from "./api/settings.js";
-import { uploadFile, urlForFile, triggerDownload, DIRECT_MAX } from "./api/upload.js";
-import { readMessage } from "./api/tg.js";
+import * as auth from "./api/auth.js";
+import { uploadFile, urlForFile, triggerDownload, downloadMultiChunk, DIRECT_MAX } from "./api/upload.js";
+import { call } from "./api/tg.js";
 
 const fmt = (b) => {
   if (!b && b !== 0) return "—";
@@ -19,9 +19,10 @@ const kindOf = (n) =>
   : (n.t || "").startsWith("audio/") ? "audio"
   : (n.t || "").includes("pdf") ? "pdf" : "file";
 const ICON = { folder: "📁", image: "🖼️", video: "🎬", audio: "🎵", pdf: "📕", file: "📄" };
+const IDLE_LOCK_MS = 10 * 60 * 1000; // auto-lock after 10 idle minutes
 
 export default function App() {
-  const [ready, setReady] = useState(false);
+  const [gate, setGate] = useState("loading"); // loading|setup|locked|open
   const [me, setMe] = useState(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
@@ -33,35 +34,54 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState("");
   const dragRef = useRef(false);
+  const idleRef = useRef(Date.now());
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  // ── boot ────────────────────────────────────────────────────────────────
+  // ── gate: vault boot ────────────────────────────────────────────────────
   useEffect(() => {
-    const s = settings.boot();
     (async () => {
-      if (!s?.token) return setReady(true);
+      const st = await auth.boot();
+      setGate(st.unlocked ? "open" : st.provisioned ? "locked" : "setup");
+    })();
+  }, []);
+
+  // once open: who am I + load the tree
+  useEffect(() => {
+    if (gate !== "open") return;
+    (async () => {
       try {
-        const m = await (await import("./api/tg.js")).call("getMe");
-        setMe(m);
+        if (!me) setMe(await call("getMe"));
         await fs.init();
         refresh();
       } catch (e) { setErr(e.message); }
-      setReady(true);
     })();
-  }, [refresh]);
+  }, [gate, me, refresh]);
 
-  async function doConnect(token, dmUserId) {
+  // ── auto-lock on idle ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (gate !== "open") return;
+    const bump = () => { idleRef.current = Date.now(); };
+    for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+      window.addEventListener(ev, bump, { passive: true });
+    }
+    const t = setInterval(() => {
+      if (Date.now() - idleRef.current > IDLE_LOCK_MS) lockNow();
+    }, 30_000);
+    return () => {
+      clearInterval(t);
+      for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) window.removeEventListener(ev, bump);
+    };
+  }, [gate]);
+
+  function lockNow() {
+    auth.lock();
+    setMe(null);
+    setPreview(null);
+    setSettingsOpen(false);
+    setDir("");
     setErr("");
-    try {
-      setBusy("Menghubungkan…");
-      const m = await settings.connect(token, dmUserId);
-      setMe(m);
-      await fs.init();
-      refresh();
-      setSettingsOpen(false);
-    } catch (e) { setErr(e.message); }
-    setBusy("");
+    setGate(auth.isProvisioned() ? "locked" : "setup");
   }
 
   // ── navigation ─────────────────────────────────────────────────────────
@@ -73,6 +93,7 @@ export default function App() {
     ? Object.values(nodes).filter((n) => n.n.toLowerCase().includes(q.toLowerCase()))
     : items;
   const trail = dir && dir !== "recycle" ? fs.pathOf(dir) : [];
+  const workerMode = !!auth.getCreds()?.worker;
 
   // ── actions ────────────────────────────────────────────────────────────
   async function withBusy(label, fn) {
@@ -88,8 +109,15 @@ export default function App() {
     await withBusy(`Upload ${files.length} file…`, async () => {
       let done = 0;
       for (const f of files) {
+        if (!workerMode && f.size > DIRECT_MAX) {
+          // refuse BEFORE uploading bytes that could never be downloaded back
+          throw new Error(
+            `"${f.name}" ${fmt(f.size)} melebihi batas ${fmt(DIRECT_MAX)} Bot API. ` +
+            `Pasang Cloudflare Worker URL di ⚙️ agar file besar tanpa batas, atau pilih file lebih kecil.`
+          );
+        }
         setBusy(`Upload ${++done}/${files.length}: ${f.name}`);
-        const up = await uploadFile(f, null, !!cfg.loadSettings().worker);
+        const up = await uploadFile(f, null, workerMode);
         await fs.addFile({
           name: f.name, size: f.size, type: f.type,
           mid: up.mid, chMids: up.chMids, chunks: up.ch,
@@ -102,14 +130,23 @@ export default function App() {
 
   const onDownload = async (n) => {
     await withBusy(`Menyiapkan ${n.n}…`, async () => {
-      const { url } = await urlForFile(n);
-      triggerDownload(url, n.n);
+      const w = auth.getCreds()?.worker;
+      if (w && (n.chMids?.length > 1 || (n.s || 0) > DIRECT_MAX)) {
+        await downloadMultiChunk(n, w); // reassembled in-browser through the Worker
+      } else {
+        const { url } = await urlForFile(n);
+        triggerDownload(url, n.n);
+      }
     });
   };
 
   const openPreview = async (n) => {
     if (n.k === "d") return setDir(n.id);
-    if (n.k === "f" && n.mid) {
+    if (n.k !== "f") return;
+    if (n.chMids?.length > 1) {
+      return setToast(`"${n.n}" tersimpan sebagai ${n.chMids.length} bagian — pakai ⬇️ Download`);
+    }
+    if (n.mid) {
       await withBusy("Memuat preview…", async () => {
         const { url } = await urlForFile(n);
         setPreview({ node: n, url });
@@ -123,22 +160,30 @@ export default function App() {
     if (e.dataTransfer?.files?.length) onFiles(e.dataTransfer.files);
   };
 
-  const shareUrl = (n) => `${location.origin}${location.pathname}?f=${n.id}`;
-
   // ── screens ────────────────────────────────────────────────────────────
-  if (!ready) return <div className="center muted">Memuat…</div>;
+  if (gate === "loading") return <div className="center muted">Memuat…</div>;
 
-  if (!me) {
+  if (gate === "setup") {
     return (
       <div className="center">
         <div className="card">
           <h1>TeleDrive Web</h1>
           <p className="muted">
-            Cloud drive tanpa server — file disimpan di Telegram, app-nya statis di Vercel.
+            Sekali setup: token + data diverifikasi ke Telegram, lalu dikunci password.
           </p>
-          <Connect token={cfg.loadSettings().token} onConnect={doConnect} />
-          {err && <p className="err">{err}</p>}
-          {busy && <p className="muted">{busy}</p>}
+          <Setup onDone={() => setGate("open")} />
+        </div>
+      </div>
+    );
+  }
+
+  if (gate === "locked") {
+    return (
+      <div className="center">
+        <div className="card">
+          <h1>🔒 Terkunci</h1>
+          <p className="muted">Masukkan password untuk membuka drive.</p>
+          <Unlock onDone={() => setGate("open")} />
         </div>
       </div>
     );
@@ -152,15 +197,16 @@ export default function App() {
         <input className="search" placeholder="Cari file…" value={q}
                onChange={(e) => setQ(e.target.value)} />
         <div className="tools">
-          <button onClick={() => setView(view === "grid" ? "list" : "grid")}>
+          <button onClick={() => setView(view === "grid" ? "list" : "grid")} title="Ganti tampilan">
             {view === "grid" ? "☰" : "▦"}
           </button>
-          <button onClick={() => setDir("recycle")}>🗑️</button>
+          <button onClick={() => setDir("recycle")} title="Sampah">🗑️</button>
           <button className="primary"
             onClick={() => withBusy("Membuat folder…", () => fs.createFolder(prompt("Nama folder?") || "Folder", dir === "recycle" ? "" : dir))}>
             + Folder
           </button>
-          <button onClick={() => setSettingsOpen(true)}>⚙️</button>
+          <button onClick={() => setSettingsOpen(true)} title="Pengaturan">⚙️</button>
+          <button onClick={lockNow} title="Kunci sekarang">🔒</button>
         </div>
       </header>
 
@@ -187,16 +233,13 @@ export default function App() {
         {filtered.map((n) => (
           <div className="item" key={n.id}>
             <div className="icon" onClick={() => openPreview(n)}>
-              {kindOf(n) === "image"
-                ? <Thumb node={n} />
-                : <span className="emoji">{ICON[kindOf(n)]}</span>}
+              {kindOf(n) === "image" && n.mid ? <Thumb node={n} /> : <span className="emoji">{ICON[kindOf(n)]}</span>}
             </div>
             <div className="meta" onClick={() => openPreview(n)}>
               <div className="name">{n.n}</div>
               <div className="sub">
-                {n.k === "d"
-                  ? `${n.c?.length || 0} item`
-                  : fmt(n.s)}
+                {n.k === "d" ? `${n.c?.length || 0} item` : fmt(n.s)}
+                {n.chMids?.length > 1 && ` · ${n.chMids.length} bagian`}
                 {" · "}{new Date(n.ts).toLocaleDateString("id-ID")}
               </div>
             </div>
@@ -213,8 +256,8 @@ export default function App() {
               ) : (
                 <>
                   <button title="Share" onClick={() => {
-                    navigator.clipboard?.writeText(shareUrl(n));
-                    setToast("Link disalin (penerima butuh token bot sendiri)");
+                    navigator.clipboard?.writeText(`${location.origin}${location.pathname}?f=${n.id}`);
+                    setToast("Link disalin (penerima butuh password + setup yang sama)");
                   }}>🔗</button>
                   <button title="Rename"
                     onClick={() => { const v = prompt("Nama baru", n.n); if (v) withBusy("…", () => fs.rename(n.id, v)); }}>✏️</button>
@@ -237,9 +280,107 @@ export default function App() {
 
       {preview && <Preview {...preview} onClose={() => setPreview(null)} onDownload={onDownload} />}
       {settingsOpen && (
-        <Settings me={me} onClose={() => setSettingsOpen(false)} onSaved={() => { refresh(); setToast("Tersimpan"); }} />
+        <Settings me={me} onClose={() => setSettingsOpen(false)}
+                  onSaved={() => { refresh(); setToast("Tersimpan"); }} onLock={lockNow} />
       )}
     </div>
+  );
+}
+
+// ── First-run wizard: verify the Telegram inputs, THEN seal them with a password ──
+function Setup({ onDone }) {
+  const prev = auth.lastInputs();
+  const [token, setToken] = useState("");
+  const [uid, setUid] = useState("");
+  const [chat, setChat] = useState(prev.chat || cfg.topics.chat);
+  const [tp, setTp] = useState(prev.tp || [cfg.topics.storage, cfg.topics.backup, cfg.topics.recycle, ...cfg.topics.mappers].join(","));
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState("");
+  const okPw = pw1.length >= 8 && pw1 === pw2;
+
+  async function submit() {
+    setErr(""); setBusy("Memverifikasi ke Telegram…");
+    try {
+      await auth.provision(
+        { token: token.trim(), dmUser: uid.trim(), chat: chat.trim(), tp: tp.trim() },
+        pw1
+      );
+      onDone();
+    } catch (e) { setErr(e.message); }
+    setBusy("");
+  }
+
+  return (
+    <>
+      <label>Bot token (dari @BotFather)
+        <input value={token} onChange={(e) => setToken(e.target.value)}
+               placeholder="123456:ABC-DEF…" autoComplete="off" spellCheck={false} />
+      </label>
+      <label>User ID Telegram kamu <span className="muted">(@userinfobot)</span>
+        <input value={uid} onChange={(e) => setUid(e.target.value.replace(/\D/g, ""))}
+               placeholder="100200300" inputMode="numeric" autoComplete="off" />
+      </label>
+      <label>Chat ID grup penyimpanan
+        <input value={chat} onChange={(e) => setChat(e.target.value)} placeholder="-100…" spellCheck={false} />
+      </label>
+      <label>Topic ID <span className="muted">7 angka: <i>storage,backup,recycle,m0,m1,m2,m3</i></span>
+        <input value={tp} onChange={(e) => setTp(e.target.value)} placeholder="61,59,60,55,56,57,58" spellCheck={false} />
+      </label>
+      <hr />
+      <label>Password <span className="muted">(min 8 karakter — kunci enkripsi lokal, hilang = kredensial hilang)</span>
+        <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} autoComplete="new-password" />
+      </label>
+      <label>Ulangi password
+        <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} autoComplete="new-password" />
+      </label>
+      {pw1 && pw2 && pw1 !== pw2 && <p className="err">Password tidak sama</p>}
+      <button className="primary wide"
+              disabled={!token.includes(":") || !/^\d{5,}$/.test(uid.trim()) || !okPw || !!busy}
+              onClick={submit}>
+        Simpan & buka drive
+      </button>
+      {busy && <p className="muted">{busy}</p>}
+      {err && <p className="err">{err}</p>}
+      <p className="muted small">
+        Token & ID dienkripsi (AES-GCM 256, kunci PBKDF2 600k iterasi) — hanya tersimpan di
+        browser ini. Syarat: bot admin grup penyimpanan + kamu sudah <b>Start</b> di chat bot.
+      </p>
+    </>
+  );
+}
+
+function Unlock({ onDone }) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(e) {
+    e?.preventDefault();
+    setErr(""); setBusy(true);
+    try { await auth.unlock(pw); onDone(); }
+    catch (er) { setErr(er.message); setPw(""); }
+    setBusy(false);
+  }
+  return (
+    <form onSubmit={submit}>
+      <label>Password
+        <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)}
+               autoComplete="current-password" />
+      </label>
+      <button className="primary wide" type="submit" disabled={!pw || busy}>
+        {busy ? "Membuka…" : "Buka"}
+      </button>
+      {err && <p className="err">{err}</p>}
+      <p className="muted small">
+        Lupa password? Tidak ada pemulihan — token sudah terenkripsi. Reset kredensial lokal
+        di bawah, lalu setup ulang dengan token bot yang sama.
+      </p>
+      <button className="wide" type="button"
+        onClick={() => { if (confirm("Lupakan kredensial tersimpan di browser ini? Drive di Telegram tidak terhapus.")) { auth.wipeLocal(); location.reload(); } }}>
+        Reset kredensial lokal
+      </button>
+    </form>
   );
 }
 
@@ -252,34 +393,6 @@ function Thumb({ node }) {
     return () => { dead = true; };
   }, [node.id]);
   return url ? <img src={url} alt={node.n} loading="lazy" /> : <span className="emoji">🖼️</span>;
-}
-
-function Connect({ token, onConnect }) {
-  const [v, setV] = useState(token || "");
-  const [uid, setUid] = useState("");
-  return (
-    <>
-      <label>
-        Bot token (dari @BotFather)
-        <input value={v} onChange={(e) => setV(e.target.value)}
-               placeholder="123456:ABC-DEF…" autoComplete="off" spellCheck={false} />
-      </label>
-      <label>
-        User ID Telegram kamu <span className="muted">(untuk membaca indeks lewat DM)</span>
-        <input value={uid} onChange={(e) => setUid(e.target.value.replace(/\D/g, ""))}
-               placeholder="100200300" inputMode="numeric" autoComplete="off" />
-      </label>
-      <button className="primary wide" disabled={!v.trim() || !v.includes(":") || !uid.trim()}
-              onClick={() => onConnect(v.trim(), uid.trim())}>
-        Hubungkan
-      </button>
-      <p className="muted small">
-        Token & ID hanya tersimpan di browser ini. Syarat: bot sudah admin grup penyimpanan,
-        dan kamu sudah menekan <b>Start</b> di chat bot (= izin DM dari kamu).
-        Lihat ID kamu lewat @userinfobot.
-      </p>
-    </>
-  );
 }
 
 function Preview({ node, url, onClose, onDownload }) {
@@ -300,10 +413,7 @@ function Preview({ node, url, onClose, onDownload }) {
           {k === "audio" && <audio src={url} controls />}
           {k === "pdf" && <iframe src={url} title={node.n} />}
           {k === "file" && (
-            <p className="muted">
-              Pratinjau tidak tersedia untuk tipe ini. Gunakan Download
-              {" "}({fmt(node.s)}).
-            </p>
+            <p className="muted">Pratinjau tidak tersedia untuk tipe ini. Gunakan Download ({fmt(node.s)}).</p>
           )}
         </div>
       </div>
@@ -311,58 +421,66 @@ function Preview({ node, url, onClose, onDownload }) {
   );
 }
 
-function Settings({ me, onClose, onSaved }) {
-  const s = cfg.loadSettings();
-  const [token, setToken] = useState(s.token || "");
-  const [worker, setWorker] = useState(s.worker || "");
-  const [dm, setDm] = useState(settings.getDmUser());
-  const [chat, setChat] = useState(s.chat || cfg.topics.chat);
-  const [tp, setTp] = useState(
-    s.tp || [cfg.topics.storage, cfg.topics.backup, cfg.topics.recycle, ...cfg.topics.mappers].join(",")
-  );
+function Settings({ me, onClose, onSaved, onLock }) {
+  const c = auth.getCreds() || {};
+  const [worker, setWorker] = useState(c.worker || "");
+  const [chat, setChat] = useState(c.chat || "");
+  const [tp, setTp] = useState(c.tp || "");
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
   const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+
   return (
     <div className="modal" onClick={onClose}>
       <div className="modalbox" onClick={(e) => e.stopPropagation()}>
         <div className="modalhead"><b>Pengaturan</b><button onClick={onClose}>✕</button></div>
         <div className="modalbody form">
-          <label>Bot token
-            <input value={token} onChange={(e) => setToken(e.target.value)} spellCheck={false} />
-          </label>
-          <label>Cloudflare Worker URL <span className="muted">(opsional — buka batas 20 MB)</span>
+          <label>Cloudflare Worker URL <span className="muted">(kosong = mode langsung, batas {fmt(DIRECT_MAX)}/file)</span>
             <input value={worker} onChange={(e) => setWorker(e.target.value)}
                    placeholder="https://teledrive-proxy.xxx.workers.dev" spellCheck={false} />
           </label>
-          <label>Telegram user id (untuk baca index)
-            <input value={dm} onChange={(e) => setDm(e.target.value)} placeholder={String(me.id)} />
-          </label>
           <label>Chat ID grup penyimpanan
-            <input value={chat} onChange={(e) => setChat(e.target.value)}
-                   placeholder="-100…" spellCheck={false} />
+            <input value={chat} onChange={(e) => setChat(e.target.value)} placeholder="-100…" spellCheck={false} />
           </label>
-          <label>Topic ID <span className="muted">(storage, backup, recycle, dipisah koma untuk 4 mapper:
-            <i> storage,backup,recycle,m0,m1,m2,m3</i>)</span>
-            <input value={tp} onChange={(e) => setTp(e.target.value)}
-                   placeholder="61,59,60,55,56,57,58" spellCheck={false} />
+          <label>Topic ID <span className="muted">7 angka: storage,backup,recycle,m0,m1,m2,m3</span>
+            <input value={tp} onChange={(e) => setTp(e.target.value)} placeholder="61,59,60,55,56,57,58" spellCheck={false} />
           </label>
           <button className="primary wide" onClick={async () => {
+            setErr(""); setMsg("");
             try {
-              const parts = tp.split(",").map((x) => parseInt(x.trim(), 10)).filter((x) => Number.isInteger(x));
-              if (parts.length && parts.length !== 7) throw new Error("Topic ID harus 7 angka: storage,backup,recycle,m0,m1,m2,m3");
-              const [storage, backup, recycle, ...mappers] = parts;
-              cfg.saveSettings({ ...s, token, worker, chat, tp: parts.length ? tp : "" });
-              const { configure } = await import("./api/tg.js");
-              configure({ token, worker, chat: chat || cfg.DEFAULT_CHAT, dmUser: dm });
-              cfg.setTopics({ chat, storage, backup, recycle, mappers });
-              if (dm) await settings.bindDmUser(dm);
+              await auth.update({ worker: worker.trim(), chat: chat.trim(), tp: tp.trim() });
+              setMsg("Tersimpan & terenkripsi ulang.");
               onSaved();
-            } catch (e) { setMsg(e.message); }
+            } catch (e) { setErr(e.message); }
           }}>Simpan</button>
-          {msg && <p className="err">{msg}</p>}
+          {msg && <p className="muted small">{msg}</p>}
+
+          <hr />
+          <p className="muted small">Ganti password (token tidak perlu diinput ulang)</p>
+          <label>Password lama
+            <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+          </label>
+          <label>Password baru (min 8)
+            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+          </label>
+          <button className="wide" onClick={async () => {
+            setErr(""); setMsg("");
+            try { await auth.changePassword(oldPw, newPw); setMsg("Password diganti."); setOldPw(""); setNewPw(""); }
+            catch (e) { setErr(e.message); }
+          }}>Ganti password</button>
+
+          <hr />
+          <button className="wide" onClick={onLock}>🔒 Kunci sekarang</button>
+          <button className="danger wide" onClick={() => {
+            if (confirm("Lupakan kredensial di browser ini? Drive di Telegram TIDAK terhapus.")) {
+              auth.wipeLocal(); location.reload();
+            }
+          }}>Reset kredensial lokal</button>
+          {err && <p className="err">{err}</p>}
           <p className="muted small">
-            Terhubung sebagai @{me.username || me.first_name}.
-            Penyimpanan: grup Telegram (topic storage {cfg.topics.storage}).
-            Batas {fmt(DIRECT_MAX)}/file tanpa Worker.
+            Bot: @{me?.username || me?.first_name} · topic storage {cfg.topics.storage}.
+            Auto-lock 10 menit idle.
           </p>
         </div>
       </div>

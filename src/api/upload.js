@@ -15,9 +15,11 @@ import { sendDoc, call, delHere } from "./tg.js";
 import { topics } from "./config.js";
 
 export const DIRECT_MAX = 20 * 1024 * 1024; // hard Bot API download ceiling in direct mode
-export const CHUNK = 19 * 1024 * 1024;      // safety margin under that ceiling
+export const CHUNK = 19 * 1024 * 1024;      // direct mode: safety margin under that ceiling
+export const CHUNK_WORKER = 45 * 1024 * 1024; // worker mode: under the 50 MB sendDocument cap
 
 export async function uploadFile(file, onProgress, workerMode) {
+  const cs = workerMode ? CHUNK_WORKER : CHUNK;
   // direct mode with an oversized file: refuse early instead of uploading
   // bytes the user can never download back.
   if (!workerMode && file.size > DIRECT_MAX) {
@@ -26,7 +28,7 @@ export async function uploadFile(file, onProgress, workerMode) {
       `Set Cloudflare Worker URL di Settings, atau pilih file lebih kecil.`
     );
   }
-  const chunks = Math.max(1, Math.ceil(file.size / CHUNK));
+  const chunks = Math.max(1, Math.ceil(file.size / cs));
   if (chunks === 1) {
     const msg = await sendDoc(topics.storage, file, JSON.stringify({ i: 0, n: 1, name: file.name }));
     onProgress?.(1);
@@ -36,7 +38,7 @@ export async function uploadFile(file, onProgress, workerMode) {
   // so the mid list is what lets a later download stitch them back together.
   const mids = [];
   for (let i = 0; i < chunks; i++) {
-    const blob = file.slice(i * CHUNK, (i + 1) * CHUNK);
+    const blob = file.slice(i * cs, (i + 1) * cs);
     const msg = await sendDoc(topics.storage, blob, JSON.stringify({ i, n: chunks, name: file.name }));
     mids.push(msg.message_id);
     onProgress?.((i + 1) / chunks);
@@ -72,6 +74,23 @@ export function triggerDownload(url, name) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+// Worker-mode multi-chunk download: fetch every part through the Worker (CORS +
+// no 20 MB cap), concat into one Blob, hand it to the download manager.
+export async function downloadMultiChunk(node, workerBase) {
+  const mids = node.chMids || (node.mid ? [node.mid] : []);
+  const parts = [];
+  for (const mid of mids) {
+    const fileId = await fileIdOf(mid);
+    const f = await call("getFile", { file_id: fileId });
+    const res = await fetch(`${workerBase.replace(/\/+$/, "")}/file/${f.file_path}`);
+    if (!res.ok) throw new Error(`chunk fetch ${res.status}`);
+    parts.push(await res.blob());
+  }
+  const url = URL.createObjectURL(new Blob(parts, { type: node.t || "application/octet-stream" }));
+  triggerDownload(url, node.n);
+  setTimeout(() => URL.revokeObjectURL(url), 120_000);
 }
 
 export async function deleteStorageMessage(mid) {

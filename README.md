@@ -1,48 +1,82 @@
 # TeleDrive Web
 
-Cloud drive ala TeleDrive: **React + Vite, murni static** di Vercel.
-Backend-nya tidak ada — **Telegram yang jadi database + object storage** via Bot API.
+Cloud drive ala TeleDrive: **React + Vite, murni static** (Netlify/Vercel gratis).
+Tanpa backend — **Telegram yang jadi database + object storage** via Bot API,
+dilindungi **password terenkripsi** di browser.
 
-## Cara kerja (semua jalur sudah diverifikasi terhadap Bot API live, Okt 2026)
+## Keamanan (login)
+
+- First run: isi token + User ID + chat/topic → diverifikasi ke Telegram → **set password**.
+  Kredensial disimpan sebagai blob **AES-GCM-256** dengan kunci **PBKDF2-SHA256 600.000 iterasi**.
+  localStorage hanya berisi `{salt, iv, ciphertext}` — tidak ada token polos, tidak ada hash password.
+- Tiap kunjungan: layar kunci → password benar = AES-GCM berhasil didekripsi.
+- **Auto-lock 10 menit idle**, tombol 🔒 kunci manual, sesi bertahan saat refresh (hilang saat tab ditutup).
+- Lupa password = tidak ada pemulihan (by design). Reset kredensial lokal → setup ulang token yang sama.
+- Backoff eksponensial setelah 3 password salah; ganti password tersedia di ⚙️.
+
+## Cara kerja (semua jalur diverifikasi ke Bot API live, Okt 2026)
 
 | Kebutuhan | Solusi |
 |---|---|
-| Metadata (pohon folder, indeks) | 4 pesan JSON (shard) di 4 topic `index-*`, satu edit = satu mutasi |
-| Byte file | dokumen di topic `storage`, chunk 19 MB, metadata di caption |
-| Baca index dari device mana pun | `forwardMessage` ke DM user → bot bisa baca isi lengkapnya → copy dihapus |
-| Replace/edit file | `editMessageText` pada pesan shard |
-| Delete permanen | `deleteMessage` pada pesan shard & dokumen |
-| Download/preview | URL `api.telegram.org/file/bot…` via `<img>/<video>/<a download>` native |
-| Token | hanya di localStorage browser + Cloudflare Worker secret (opsional) |
+| Indeks pohon folder | 4 pesan JSON (shard) di 4 topic `index-*`; satu edit = satu mutasi |
+| Byte file | dokumen di topic `storage`; chunk 19 MB (direct) / 45 MB (Worker) |
+| Baca indeks dari device lain | `forwardMessage` ke DM user → baca isi → copy langsung dihapus |
+| Hapus permanen | `deleteMessage` pesan indeks & dokumen |
+| Preview/download | URL `api.telegram.org/file/...` via tag native `<img>/<video>/<a>` |
+| Kredensial | blob terenkripsi di localStorage; token tak pernah plaintext |
 
-**Batas Bot API** (terukur, bukan dokumen): upload ≤ 50 MB per call, **getFile ≤ 20 MB**
-→ mode tanpa Worker dibatasi 20 MB/file. Pasang Cloudflare Worker (folder `worker/`)
-agar bebas batas + download berprogress.
+**Batas Bot API** (terukur): upload ≤ 50 MB/call, download (getFile) ≤ 20 MB.
+→ Mode tanpa Worker: **20 MB/file**. Dengan **Cloudflare Worker** (folder `worker/`,
+secret `BOT_TOKEN`): **tanpa batas ukuran file** — chunk 45 MB di-stitch di browser + CORS.
 
-> Sebelum connect, siapkan **User ID Telegram kamu** (lihat @userinfobot) dan tekan
-> **Start** di chat bot. Bot memakai DM kamu sebagai jalur baca indeks
-> (`forwardMessage` → baca → hapus) karena Bot API tidak punya "getMessages".
+## Setup
 
-## Setup (yGTG paling singkat)
-
-1. **Buat bot**: chat @BotFather → `/newbot` → salin token.
-2. **Grup penyimpanan**: grup Telegram (disarankan grup privat) → jadikan supergroup+topics →
-   tambahkan bot sebagai admin (izin delete messages).
-   Salin `src/api/config.js`: isi `MAPPERS`, `BACKUP_TOPIC`, `RECYCLE_TOPIC`, `STORAGE_TOPIC`,
-   `DEFAULT_CHAT` dengan thread id topic kamu (lihat angka di `t.me/c/<chat>/<topic>`).
-3. **DM user**: kirim `/start` ke bot dari akunmu (untuk baca index).
-4. **Deploy Vercel**:
+1. @BotFather → `/newbot` → salin **token**.
+2. Buat grup Telegram (privat) → aktifkan **Topics** → jadikan supergroup →
+   tambahkan bot sebagai **admin** (izin Delete messages + Manage topics wajib).
+3. Buat 7 topic di grup (nama bebas): 4 untuk `index`, 1 `index-backup`,
+   1 `recycle`, 1 `storage`. Catat 7 thread ID-nya (angka di URL topic):
+   urutan input: `storage,backup,recycle,m0,m1,m2,m3`.
+4. Dari akunmu: tekan **Start** di chat bot (izin DM), ambil **User ID** lewat @userinfobot.
+5. Deploy:
    ```bash
-   npm i
-   npm run build         # dist/
-   vercel --prod         # atau import repo di vercel.com
+   npm i && npm run build     # dist/
+   # Netlify: import repo dari GitHub (build cmd & publish dir terdeteksi otomatis)
+   # atau: vercel --prod
    ```
-5. Buka app → Settings → tempel token → selesai. Semua data milik grup Telegram-mu.
+6. Buka app → isi semua field + password → **Simpan & buka drive**.
 
-## Opsional: Worker (buka batas 20 MB)
+Semua ID di atas bisa diubah kapan pun dari ⚙️ Settings (bisa nempel ke grup/bot lain).
 
-`worker/worker.js` → deploy ke Cloudflare Workers (secret `BOT_TOKEN`) →
-tempel URL-nya di Settings. Pada mode ini token tidak pernah dikirim ke browser.
+## Opsional tapi disarankan: Cloudflare Worker (bebas batas 20 MB)
+
+1. dash.cloudflare.com → Workers → Create Worker → paste isi `worker/worker.js`
+2. Settings → Variables → **Add secret**: `BOT_TOKEN` = token bot-mu
+3. Salin URL `*.workers.dev` → tempel di ⚙️ Settings app → Simpan.
+
+Mode Worker juga menghilangkan token dari browser (tinggal di Worker) dan
+mengaktifkan download berprogress untuk file multi-chunk.
+
+## Menjalankan lokal
+
+```bash
+npm i
+npm run dev                 # http://localhost:5173
+node scripts/test-e2e.mjs   # smoke test layer penyimpanan (butuh token di .env Hermes)
+```
+
+## Struktur
+
+```
+src/api/crypto.js   PBKDF2 + AES-GCM helpers (WebCrypto)
+src/api/auth.js     vault: provision/unlock/changePassword/lock + backoff
+src/api/tg.js       transport Bot API + retry (blackhole-connect & 429 retry_after)
+src/api/store.js    indeks sharded + registry + backup
+src/api/fs.js       operasi pohon: mkdir, rename, move, trash, purge, emptyBin
+src/api/upload.js   chunked upload + download (direct & Worker mode)
+src/api/config.js   chat + topic ids (runtime-configurable)
+worker/worker.js    proxy Cloudflare opsional (CORS pada /file/, token di secret)
+```
 
 ## Skema data
 
@@ -53,20 +87,12 @@ tempel URL-nya di Settings. Pada mode ini token tidak pernah dikirim ke browser.
     "ef56gh78": { "id": "ef56gh78", "k": "f", "n": "a.jpg", "s": 812345, "t": "image/jpeg",
                   "p": "ab12cd34", "mid": 123, "ts": 1760000001000 }
 } }
-// caption dokumen storage: {"i":0,"n":1,"name":"a.jpg"}  (ke-0 dari 1 chunk)
+// caption dokumen storage: {"i":0,"n":1,"name":"a.jpg"}   (chunk ke-0 dari 1)
 ```
 
-## Menjalankan lokal
+## Batas
 
-```bash
-npm i
-npm run dev          # http://localhost:5173
-node scripts/test-e2e.mjs   # smoke test layer API (butuh token di env)
-```
-
-## Batas & catatan
-
-- 1 grup = 1 drive. Mau multi-user? grit grup lain + topic set sendiri.
-- Topic 4 mapper dipakai agar edit-message 4096 char tetap lega; pembagian by-hash stabil antar device.
-- Kehilangan localStorage = hubungkan ulang via message link backup (restore manual, lihat topic `index-backup`).
-- Chat spam tidak terjadi: mutasi = edit pesan yang sama; hanya chunk file yang menambah pesan.
+- 1 grup = 1 drive; kehilangan akses grup = kehilangan drive.
+- `localStorage` hilang (clear browser) = setup ulang; drive di Telegram tetap aman.
+- Preview hanya untuk file single-chunk; file multi-chunk lewat Download.
+- Mutasi indeks = edit pesan yang sama, jadi chat tidak spam; hanya chunk file menambah pesan.
