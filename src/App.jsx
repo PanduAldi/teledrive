@@ -292,29 +292,75 @@ function Setup({ onDone }) {
   const prev = auth.lastInputs();
   const [token, setToken] = useState("");
   const [uid, setUid] = useState("");
-  const [chat, setChat] = useState(prev.chat || cfg.topics.chat);
-  const [tp, setTp] = useState(prev.tp || [cfg.topics.storage, cfg.topics.backup, cfg.topics.recycle, ...cfg.topics.mappers].join(","));
+  const [botUser, setBotUser] = useState(null);
+  const [chat, setChat] = useState("");
+  const [tp, setTp] = useState("auto");
+  const [autoTps, setAutoTps] = useState(false);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
+
   const problems = [];
   if (!token.includes(":")) problems.push("Token belum valid (harusnya format `123456:ABC…` dari @BotFather)");
   if (!/^\d{5,}$/.test(uid.trim())) problems.push("User ID belum diisi (angka, ≥5 digit — lihat @userinfobot)");
   if (pw1.length < 8) problems.push("Password kurang dari 8 karakter");
   else if (pw1 !== pw2) problems.push("Password dan ulanginya tidak sama");
+  const chatEmpty = !chat.trim() && tp !== "auto";
+  if (chatEmpty) problems.push("Chat ID grup penyimpanan belum diisi");
+
+  async function checkToken() {
+    setErr(""); setBusy("Memeriksa token…");
+    try {
+      const { callWith } = await import("./api/tg.js");
+      const me = await callWith(token.trim(), "getMe", {}, { timeoutMs: 8000 });
+      setBotUser(`@${me.username}`);
+      setErr("");
+      return me;
+    } catch (e) {
+      setBotUser(null);
+      setErr("✗ Token ditolak Telegram: " + e.message);
+      return null;
+    } finally { setBusy(""); }
+  }
+
+  // One click: add the bot to your group as admin, then this creates the 7 topics
+  // and fills every id for you. Topic mode must already be ON in the group.
+  async function autoTopics() {
+    setErr(""); setBusy("Membuat 7 topic di grup…");
+    try {
+      const { createTopics } = await import("./api/auth.js");
+      const { callWith } = await import("./api/tg.js");
+      const chatId = chat.trim();
+      const me = await callWith(token.trim(), "getChat", { chat_id: chatId }, { timeoutMs: 8000 });
+      if (!me.is_forum) throw new Error("Grup belum aktif Topics-nya. Di grup: buka menu → Manage group → Toggle Topics ON, lalu coba lagi.");
+      const r = await createTopics(token.trim(), chatId);
+      setTp(r.tp);
+      setAutoTps(true);
+      setBusy("");
+      setErr("");
+      return r;
+    } catch (e) { setBusy(""); setErr("✗ " + e.message); return null; }
+  }
 
   async function submit() {
     setErr(""); setBusy("");
     if (problems.length) { setErr(problems[0]); return; }
-    setBusy("Memverifikasi token ke Telegram…");
+    setBusy("Memverifikasi token & grup ke Telegram…");
+    const tpVal = tp.trim() === "auto" ? prev.tp || "" : tp.trim();
+    if (!tpVal) {
+      setBusy("");
+      setErr("Topic ID belum ada. Klik \"Buat 7 topic otomatis\" setelah mengisi Chat ID, atau isi manual 7 angka.");
+      return;
+    }
     try {
-      await auth.provision(
-        { token: token.trim(), dmUser: uid.trim(), chat: chat.trim(), tp: tp.trim() },
+      const r = await auth.provision(
+        { token: token.trim(), dmUser: uid.trim(), chat: chat.trim(), tp: tpVal },
         pw1
       );
       setBusy("Mengenkripsi & membuka drive…");
       onDone();
+      return r;
     } catch (e) {
       setBusy("");
       setErr(/Failed to fetch|timeout|abort/i.test(e.message)
@@ -327,8 +373,9 @@ function Setup({ onDone }) {
     <>
       <label>Bot token (dari @BotFather)
         <input value={token} onChange={(e) => setToken(e.target.value)}
-               placeholder="123456:ABC-DEF…" autoComplete="off" spellCheck={false} />
+               placeholder="123456:ABC-DEF…" autoComplete="off" spellCheck={false} onBlur={checkToken} />
       </label>
+      {botUser && <p className="ok small">✓ Token valid — {botUser}</p>}
       <label>User ID Telegram kamu <span className="muted">(@userinfobot)</span>
         <input value={uid} onChange={(e) => setUid(e.target.value.replace(/\D/g, ""))}
                placeholder="100200300" inputMode="numeric" autoComplete="off" />
@@ -336,9 +383,19 @@ function Setup({ onDone }) {
       <label>Chat ID grup penyimpanan
         <input value={chat} onChange={(e) => setChat(e.target.value)} placeholder="-100…" spellCheck={false} />
       </label>
-      <label>Topic ID <span className="muted">7 angka: <i>storage,backup,recycle,m0,m1,m2,m3</i></span>
-        <input value={tp} onChange={(e) => setTp(e.target.value)} placeholder="61,59,60,55,56,57,58" spellCheck={false} />
+      <p className="muted small">
+        Cara ambil: tambahkan bot ke grup (sebagai <b>admin</b>, izin <i>Manage topics</i> + <i>Delete messages</i>),
+        aktifkan <b>Topics</b> di grup, lalu forward pesan grup ke @username_to_id_bot — atau pakai
+        tombol di bawah kalau grup sudah bertopic.
+      </p>
+      <button className="wide" disabled={!token.includes(":") || !chat.trim() || !!busy} onClick={autoTopics}>
+        Buat 7 topic otomatis
+      </button>
+      <label>Topic ID <span className="muted">kosongkan/"auto" untuk tombol otomatis, atau 7 angka:</span>
+        <input value={tp} onChange={(e) => setTp(e.target.value)}
+               placeholder="auto (disarankan)" spellCheck={false} />
       </label>
+      <p className="muted small">Urutan manual: <i>storage,backup,recycle,m0,m1,m2,m3</i></p>
       <hr />
       <label>Password <span className="muted">(min 8 karakter — kunci enkripsi lokal, hilang = kredensial hilang)</span>
         <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} autoComplete="new-password" />

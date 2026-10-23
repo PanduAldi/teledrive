@@ -35,9 +35,37 @@ function saveInputs(o) { kv.set("tdw.inputs", JSON.stringify(o)); }
 // Verify the Telegram side BEFORE sealing it behind the password.
 // Short per-attempt timeout: a blackholed connect must fail fast enough that the
 // setup button never looks dead (4 × 8 s worst case, then a clear error).
-async function probe({ token, dmUser }) {
+async function probe({ token, dmUser, chat }) {
   await callWith(token, "getMe", {}, { timeoutMs: 8000 });
+  if (chat) {
+    // Catch a wrong/unreachable storage group here, not on the first folder save.
+    const me = await callWith(token, "getMe", {}, { timeoutMs: 8000 });
+    const info = await callWith(token, "getChat", { chat_id: String(chat) }, { timeoutMs: 8000 })
+      .catch(() => { throw new Error(
+          `Bot tidak bisa mengakses grup ${chat}. Tambahkan bot sebagai ADMIN di grup itu dulu ` +
+          `(izin "Manage topics" + "Delete messages").`); });
+    if (info.type === "private") throw new Error("Chat ID itu chat pribadi, bukan grup penyimpanan.");
+    const admins = await callWith(token, "getChatMember", { chat_id: String(chat), user_id: me.id })
+      .catch(() => null);
+    if (admins && admins.status !== "administrator" && admins.status !== "creator") {
+      throw new Error(`Bot ada di grup tapi statusnya "${admins.status}". Jadikan ADMIN dulu (izin Manage topics + Delete messages).`);
+    }
+  }
   if (dmUser) await callWith(token, "sendChatAction", { chat_id: String(dmUser), action: "typing" }, { timeoutMs: 8000 });
+}
+
+// Create the 7 required topics in a forum group the bot administers, so the user
+// never has to hunt for thread ids by hand (Bot API has no "list topics").
+export async function createTopics(token, chatId) {
+  const names = ["index-0", "index-1", "index-2", "index-3", "index-backup", "recycle-bin", "storage"];
+  const ids = [];
+  for (const name of names) {
+    const t = await callWith(token, "createForumTopic", { chat_id: String(chatId), name });
+    ids.push(t.message_thread_id);
+  }
+  const [m0, m1, m2, m3, backup, recycle, storage] = ids;
+  return { mappers: [m0, m1, m2, m3], backup, recycle, storage,
+           tp: [storage, backup, recycle, m0, m1, m2, m3].join(",") };
 }
 
 function parseTp(tp) {
