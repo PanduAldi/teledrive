@@ -298,10 +298,16 @@ function Setup({ onDone }) {
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
-  const okPw = pw1.length >= 8 && pw1 === pw2;
+  const problems = [];
+  if (!token.includes(":")) problems.push("Token belum valid (harusnya format `123456:ABC…` dari @BotFather)");
+  if (!/^\d{5,}$/.test(uid.trim())) problems.push("User ID belum diisi (angka, ≥5 digit — lihat @userinfobot)");
+  if (pw1.length < 8) problems.push("Password kurang dari 8 karakter");
+  else if (pw1 !== pw2) problems.push("Password dan ulanginya tidak sama");
 
   async function submit() {
-    setErr(""); setBusy("Memverifikasi token ke Telegram…");
+    setErr(""); setBusy("");
+    if (problems.length) { setErr(problems[0]); return; }
+    setBusy("Memverifikasi token ke Telegram…");
     try {
       await auth.provision(
         { token: token.trim(), dmUser: uid.trim(), chat: chat.trim(), tp: tp.trim() },
@@ -341,13 +347,14 @@ function Setup({ onDone }) {
         <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} autoComplete="new-password" />
       </label>
       {pw1 && pw2 && pw1 !== pw2 && <p className="err">Password tidak sama</p>}
-      <button className="primary wide"
-              disabled={!token.includes(":") || !/^\d{5,}$/.test(uid.trim()) || !okPw || !!busy}
-              onClick={submit}>
-        Simpan & buka drive
+      <button className="primary wide" disabled={!!busy} onClick={submit}>
+        {busy ? busy : "Simpan & buka drive"}
       </button>
       {busy && <p className="muted">{busy}</p>}
       {err && <p className="err">{err}</p>}
+      {!err && !busy && problems.length > 0 && (
+        <p className="muted small">Belum lengkap: {problems.join(" · ")}</p>
+      )}
       <p className="muted small">
         Token & ID dienkripsi (AES-GCM 256, kunci PBKDF2 600k iterasi) — hanya tersimpan di
         browser ini. Syarat: bot admin grup penyimpanan + kamu sudah <b>Start</b> di chat bot.
